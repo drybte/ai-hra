@@ -1,40 +1,44 @@
 import os
 import time
-import requests
 import datetime
+import requests
 import urllib3
 import redis
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
 load_dotenv()
 
 app = Flask(__name__)
 
 api_key = os.environ.get("OPENAI_API_KEY", "")
 base_url = os.environ.get("OPENAI_BASE_URL", "https://kurim.ithope.eu/v1")
+port = int(os.environ.get("PORT", 5000))
 
 redis_host = os.environ.get("REDIS_HOST", "cache")
 redis_port = int(os.environ.get("REDIS_PORT", 6379))
 
 r = None
-for _ in range(10):
+for i in range(10):
     try:
         r = redis.Redis(host=redis_host, port=redis_port, decode_responses=True)
         r.ping()
         print("Redis connected")
         break
     except Exception:
-        print("Waiting for Redis...")
+        print(f"Waiting for Redis... attempt {i + 1}/10")
         time.sleep(2)
 
-@app.route('/', methods=['GET'])
-def home():
-    return render_template('index.html')
 
-@app.route('/status', methods=['GET'])
+@app.route("/", methods=["GET"])
+def home():
+    return jsonify({
+        "message": "AI Game Advisor běží"
+    })
+
+
+@app.route("/status", methods=["GET"])
 def status():
     return jsonify({
         "status": "running",
@@ -43,7 +47,8 @@ def status():
         "app": "AI Game Advisor"
     })
 
-@app.route('/recommend', methods=['POST'])
+
+@app.route("/recommend", methods=["POST"])
 def game_advisor():
     data = request.get_json(silent=True) or {}
     genre = data.get("genre", "akční").strip().lower()
@@ -51,10 +56,11 @@ def game_advisor():
     cache_key = f"recommendation:{genre}"
 
     try:
-        if r:
+        if r is not None:
             cached = r.get(cache_key)
             if cached:
                 return jsonify({
+                    "genre": genre,
                     "recommendation": cached,
                     "source": "cache"
                 })
@@ -82,10 +88,7 @@ def game_advisor():
     }
 
     try:
-        clean_url = base_url.rstrip('/')
-        target_url = f"{clean_url}/chat/completions"
-
-        print(f"DEBUG: Doporučuji hru pro žánr: {genre}")
+        target_url = f"{base_url.rstrip('/')}/chat/completions"
 
         response = requests.post(
             target_url,
@@ -96,27 +99,30 @@ def game_advisor():
         )
 
         if response.status_code == 200:
-            ai_response = response.json()['choices'][0]['message']['content']
+            ai_response = response.json()["choices"][0]["message"]["content"]
 
             try:
-                if r:
-                    r.set(cache_key, ai_response)
+                if r is not None:
+                    r.setex(cache_key, 3600, ai_response)
             except Exception as e:
                 print(f"Redis write error: {e}")
 
             return jsonify({
+                "genre": genre,
                 "recommendation": ai_response,
                 "source": "api"
             })
-        else:
-            return jsonify({
-                "error": f"Server vrátil {response.status_code}.",
-                "details": response.text
-            }), response.status_code
+
+        return jsonify({
+            "error": f"Server vrátil {response.status_code}.",
+            "details": response.text
+        }), response.status_code
 
     except Exception as e:
-        return jsonify({"error": f"Spojení selhalo: {str(e)}"}), 500
+        return jsonify({
+            "error": f"Spojení selhalo: {str(e)}"
+        }), 500
 
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
+
+if __name__ == "__main__":
     app.run(host="0.0.0.0", port=port)
